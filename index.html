@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>สแกน QR ใบสั่งผลิต</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#000;color:#fff;overflow:hidden;
+    font-family:'IBM Plex Sans Thai',system-ui,-apple-system,'Segoe UI',sans-serif;-webkit-tap-highlight-color:transparent}
+  video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover}
+  .frame{position:fixed;left:50%;top:46%;width:min(70vw,320px);aspect-ratio:1;transform:translate(-50%,-50%);
+    box-shadow:0 0 0 100vmax rgba(0,0,0,.45);border-radius:18px}
+  .frame i{position:absolute;width:36px;height:36px;border:4px solid #fff}
+  .frame i:nth-child(1){left:-2px;top:-2px;border-right:0;border-bottom:0;border-top-left-radius:18px}
+  .frame i:nth-child(2){right:-2px;top:-2px;border-left:0;border-bottom:0;border-top-right-radius:18px}
+  .frame i:nth-child(3){left:-2px;bottom:-2px;border-right:0;border-top:0;border-bottom-left-radius:18px}
+  .frame i:nth-child(4){right:-2px;bottom:-2px;border-left:0;border-top:0;border-bottom-right-radius:18px}
+  .line{position:absolute;left:8%;right:8%;height:2px;background:#4ade80;box-shadow:0 0 12px #4ade80;animation:l 1.8s ease-in-out infinite}
+  @keyframes l{0%,100%{top:10%}50%{top:88%}}
+  body.hit .frame i{border-color:#4ade80}
+  body.hit .line,body.off .line{display:none}
+  body.off .frame{opacity:.35}
+  .top{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:calc(14px + env(safe-area-inset-top)) 16px 16px;background:linear-gradient(rgba(0,0,0,.65),transparent)}
+  .top b{font-size:18px;display:block}
+  .top small{font-size:12px;opacity:.75;letter-spacing:.06em}
+  .x{flex:none;width:46px;height:46px;border-radius:50%;border:0;background:rgba(255,255,255,.18);color:#fff;font-size:20px;cursor:pointer}
+  .bottom{position:fixed;left:0;right:0;bottom:0;text-align:center;
+    padding:18px 16px calc(26px + env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(0,0,0,.75))}
+  #msg{font-size:16px;min-height:24px;margin-bottom:12px}
+  #msg.warn{color:#fecaca;font-weight:600}
+  #msg.ok{color:#bbf7d0;font-weight:700;font-size:22px;letter-spacing:.02em}
+  .btn{border:1.5px solid rgba(255,255,255,.65);background:none;color:#fff;border-radius:999px;padding:10px 24px;font:inherit;font-weight:600;cursor:pointer}
+</style>
+</head>
+<body>
+<video id="v" playsinline muted autoplay></video>
+<div class="frame"><i></i><i></i><i></i><i></i><div class="line"></div></div>
+<div class="top">
+  <div><small>EFM-1QD-011</small><b>เล็ง QR บนใบสั่งผลิต</b></div>
+  <button class="x" id="cancel" aria-label="ยกเลิก">✕</button>
+</div>
+<div class="bottom">
+  <div id="msg">กำลังเปิดกล้อง…</div>
+  <button class="btn" id="retry" hidden>ลองใหม่</button>
+</div>
+
+<script src="jsQR.js" defer></script>
+<script>
+(function(){
+  'use strict';
+  // ส่งกลับได้เฉพาะเว็บแอป Google Apps Script เท่านั้น (กันคนเอาหน้านี้ไปเด้งไปเว็บอื่น)
+  const ALLOWED = /^https:\/\/script\.google\.com\/(a\/macros\/[^\/?#]+\/|macros\/)s\/[\w-]+\/(exec|dev)$/;
+  const $ = s => document.querySelector(s);
+  const msg = (t, cls) => { $('#msg').textContent = t; $('#msg').className = cls || ''; };
+
+  // ลิงก์กลับ: จาก ?return=... หรือที่จำไว้ครั้งก่อน
+  let ret = new URLSearchParams(location.search).get('return') || '';
+  if (ALLOWED.test(ret)) { try { localStorage.setItem('scanReturn', ret); } catch(e){} }
+  else { try { ret = localStorage.getItem('scanReturn') || ''; } catch(e){ ret = ''; } if (!ALLOWED.test(ret)) ret = ''; }
+
+  function backTo(po){
+    if (!ret){ msg('ได้เลข ' + po + ' แต่ไม่รู้จะส่งกลับไปที่ไหน — เปิดหน้านี้จากปุ่ม QR ในระบบตรวจสอบกล่อง', 'warn'); return; }
+    location.replace(ret + (po ? '?po=' + encodeURIComponent(po) : ''));
+  }
+  $('#cancel').addEventListener('click', () => { stop(); ret ? backTo('') : history.back(); });
+  $('#retry').addEventListener('click', start);
+
+  function extractPo(text){
+    const m = String(text || '').toUpperCase().match(/B0\d{5,}/);
+    return m ? m[0] : '';
+  }
+
+  let stream = null, scanning = false, detector = null, lastBad = '';
+  const cv = document.createElement('canvas');
+  const ctx = cv.getContext('2d', { willReadFrequently:true });
+
+  async function start(){
+    $('#retry').hidden = true;
+    document.body.className = '';
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      document.body.className = 'off';
+      msg('เบราว์เซอร์นี้เปิดกล้องไม่ได้ — ลองเปิดด้วย Chrome หรือ Safari', 'warn'); return;
+    }
+    msg('กำลังเปิดกล้อง…');
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({ audio:false,
+        video:{ facingMode:{ ideal:'environment' }, width:{ ideal:1280 }, height:{ ideal:720 } } });
+    }catch(err){
+      document.body.className = 'off';
+      msg(err && err.name === 'NotAllowedError'
+        ? 'ยังไม่ได้อนุญาตให้ใช้กล้อง — เปิดสิทธิ์กล้องให้เว็บนี้ในการตั้งค่าเบราว์เซอร์ แล้วกดลองใหม่'
+        : 'เปิดกล้องไม่ได้ (' + (err && err.name || 'error') + ')', 'warn');
+      $('#retry').hidden = false; return;
+    }
+    const v = $('#v');
+    v.srcObject = stream;
+    try { await v.play(); } catch(e){}
+    detector = null;
+    if ('BarcodeDetector' in window){
+      try {
+        const f = await window.BarcodeDetector.getSupportedFormats();
+        if (f.indexOf('qr_code') >= 0) detector = new window.BarcodeDetector({ formats:['qr_code'] });
+      } catch(e){}
+    }
+    msg('เล็งให้ QR อยู่ในกรอบ');
+    scanning = true;
+    tick();
+  }
+
+  function stop(){
+    scanning = false;
+    if (stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
+  }
+
+  async function tick(){
+    if (!scanning) return;
+    const v = $('#v');
+    if (v.readyState >= 2 && v.videoWidth && (detector || window.jsQR)){
+      let texts = [];
+      try{
+        if (detector){
+          texts = (await detector.detect(v)).map(x => x.rawValue);
+        } else {
+          const k = Math.min(1, 720 / Math.max(v.videoWidth, v.videoHeight));
+          cv.width = Math.round(v.videoWidth * k); cv.height = Math.round(v.videoHeight * k);
+          ctx.drawImage(v, 0, 0, cv.width, cv.height);
+          const code = window.jsQR(ctx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height, { inversionAttempts:'dontInvert' });
+          if (code && code.data) texts = [code.data];
+        }
+      }catch(e){}
+      const po = texts.map(extractPo).find(Boolean);
+      if (po){
+        scanning = false;
+        document.body.className = 'hit';
+        msg(po, 'ok');
+        if (navigator.vibrate) navigator.vibrate(80);
+        setTimeout(() => { stop(); backTo(po); }, 300);
+        return;
+      }
+      if (texts.length && texts[0] !== lastBad){ lastBad = texts[0]; msg('QR นี้ไม่มีเลขใบสั่งผลิต (B0…)', 'warn'); }
+    }
+    setTimeout(() => requestAnimationFrame(tick), detector ? 60 : 120);
+  }
+
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); else if (!stream) start(); });
+  window.addEventListener('pageshow', e => { if (e.persisted && !stream) start(); });   // กดย้อนกลับมาหน้านี้
+  start();
+})();
+</script>
+</body>
+</html>
