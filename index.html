@@ -85,7 +85,22 @@
     }
     location.replace(ret + (po ? '?po=' + encodeURIComponent(po) : ''));
   }
-  $('#cancel').addEventListener('click', () => { stop(); ret ? backTo('') : history.back(); });
+  // เปิดมาเป็นแท็บใหม่จากระบบตรวจสอบกล่อง → ส่งเลขกลับไปแท็บเดิมแล้วปิดตัวเอง (เร็ว ไม่ต้องโหลดใหม่)
+  let opener = null;
+  try { opener = window.opener && !window.opener.closed ? window.opener : null; } catch(e){ opener = null; }
+  function sendToOpener(po){
+    if (!opener) return false;
+    try { opener.postMessage({ type:'spc-scan', po: po }, '*'); } catch(e){ return false; }
+    window.close();
+    // ถ้าปิดแท็บเองไม่ได้ (บางเบราว์เซอร์) — เลขส่งไปแล้ว บอกให้สลับกลับไปแท็บเดิม
+    setTimeout(() => { document.body.className = 'off'; msg('ส่งเลข ' + po + ' แล้ว — สลับกลับไปแท็บระบบตรวจสอบกล่องได้เลย', 'ok'); }, 400);
+    return true;
+  }
+  $('#cancel').addEventListener('click', () => {
+    stop();
+    if (opener){ window.close(); setTimeout(() => ret ? backTo('') : history.back(), 300); return; }
+    ret ? backTo('') : history.back();
+  });
   $('#retry').addEventListener('click', start);
 
   function extractPo(text){
@@ -157,7 +172,7 @@
         document.body.className = 'hit';
         msg(po, 'ok');
         if (navigator.vibrate) navigator.vibrate(80);
-        setTimeout(() => { stop(); backTo(po); }, 300);
+        setTimeout(() => { stop(); if (!sendToOpener(po)) backTo(po); }, 250);
         return;
       }
       if (texts.length && texts[0] !== lastBad){ lastBad = texts[0]; msg('QR นี้ไม่มีเลขใบสั่งผลิต (B0…)', 'warn'); }
